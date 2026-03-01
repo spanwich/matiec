@@ -1222,3 +1222,21 @@ compilation unit.
 interpreter manages exactly one state vector. Multiple interacting programs
 require scheduler verification (out of scope). All five benchmarks follow this
 pattern.
+
+### DDR-013: Counter Saturation vs. Arithmetic Wrap
+
+INT arithmetic (ADD, SUB expressions) wraps modulo 2^16 per DDR-003.
+CTU/CTD/CTUD counter values **saturate** at `Int16.max_int` (32767) and
+`Int16.min_int` (-32768) rather than wrapping.
+
+**Rationale**:
+- Wrapping counters are almost always programming errors in safety logic. A
+  counter that wraps from 32767 to -32768 would incorrectly toggle the Q output.
+- Saturation is consistent with the matiec CTU/CTD/CTUD implementations, which
+  guard increments with `cv < PV` and decrements with `cv > 0`.
+- F\* proof: saturation makes counter values monotonically bounded, simplifying
+  the inductive argument that Q eventually becomes TRUE (or stays FALSE).
+
+**Distinction**: Expression-level `a + b` wraps (DDR-003). FB-internal counter
+updates saturate (DDR-013). The two policies apply to different domains and do
+not conflict.
