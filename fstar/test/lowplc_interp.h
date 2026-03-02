@@ -314,7 +314,7 @@ static inline void ctu_step(ctu_state_t *s, bool cu, bool r, int16_t pv,
     if (r) {
         s->cv = 0;
     } else if (cu && !s->prev_cu) {
-        s->cv = add_wrap(s->cv, 1);
+        if (s->cv < pv) s->cv = add_wrap(s->cv, 1);
     }
     s->prev_cu = cu ? 1 : 0;
     *q_out = s->cv >= pv;
@@ -327,7 +327,7 @@ static inline void ctd_step(ctd_state_t *s, bool cd, bool ld, int16_t pv,
     if (ld) {
         s->cv = pv;
     } else if (cd && !s->prev_cd) {
-        s->cv = sub_wrap(s->cv, 1);
+        if (s->cv > 0) s->cv = sub_wrap(s->cv, 1);
     }
     s->prev_cd = cd ? 1 : 0;
     *q_out = s->cv <= 0;
@@ -338,13 +338,17 @@ static inline void ctd_step(ctd_state_t *s, bool cd, bool ld, int16_t pv,
 static inline void ctud_step(ctud_state_t *s, bool cu, bool cd,
                              bool r, bool ld, int16_t pv,
                              bool *qu_out, bool *qd_out, int16_t *cv_out) {
+    bool rising_cu = cu && !s->prev_cu;
+    bool rising_cd = cd && !s->prev_cd;
     if (r) {
         s->cv = 0;
     } else if (ld) {
         s->cv = pv;
+    } else if (rising_cu && rising_cd) {
+        /* simultaneous: cancel */
     } else {
-        if (cu && !s->prev_cu) s->cv = add_wrap(s->cv, 1);
-        if (cd && !s->prev_cd) s->cv = sub_wrap(s->cv, 1);
+        if (rising_cu && s->cv < pv) s->cv = add_wrap(s->cv, 1);
+        if (rising_cd && s->cv > 0)  s->cv = sub_wrap(s->cv, 1);
     }
     s->prev_cu = cu ? 1 : 0;
     s->prev_cd = cd ? 1 : 0;
