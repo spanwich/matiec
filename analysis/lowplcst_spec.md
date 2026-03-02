@@ -1240,3 +1240,23 @@ CTU/CTD/CTUD counter values **saturate** at `Int16.max_int` (32767) and
 **Distinction**: Expression-level `a + b` wraps (DDR-003). FB-internal counter
 updates saturate (DDR-013). The two policies apply to different domains and do
 not conflict.
+
+### DDR-014: Parser Implementation Language — Python (Not Verified F\*)
+
+The LowPLC-ST parser (Task D4) is implemented in Python 3, not in F\*/Low\*.
+
+**Rationale**:
+- The parser runs only on the development machine and is **outside the runtime
+  TCB**. It does not execute on the STM32 target.
+- Its correctness is empirically validated by:
+  (a) Parser output passing EverParse TLV validation on every run.
+  (b) Interpreted outputs matching matiec reference outputs for all 5 benchmarks
+      across 100+ scan cycles per benchmark.
+- A verified F\* recursive descent parser for a non-trivial grammar would add
+  2–4 weeks to the project timeline with no change to the runtime correctness
+  guarantees.
+- This is analogous to CompCert's use of an unverified lexer/parser — the
+  verified portion starts at the AST (in our case, at the TLV binary).
+
+**Future work**: A verified F\* parser could be added to extend the TCB boundary
+from TLV binary to LowPLC-ST source text.
