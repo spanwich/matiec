@@ -2,7 +2,7 @@
  * b1_esd.tlv.h — Hand-encoded TLV binary for B1 (ESD Interlock).
  *
  * Source: benchmarks/b1_esd.st
- * Encoding: analysis/tlv_format.md §8.1
+ * Encoding: D5 format (ELSIFs flattened into nested IF_BLOCKs)
  *
  * Variable Pool Mapping:
  *   BOOL pool (n_bools = 12):
@@ -26,7 +26,7 @@
  *     n_ton = 1:  [0] alarm_delay
  *     (all other FB counts = 0)
  *
- * Total: 20 (header) + 0 (init) + 87 (body) = 107 bytes.
+ * Total: 20 (header) + 0 (init) + 95 (body) = 115 bytes.
  */
 
 #ifndef B1_ESD_TLV_H
@@ -52,9 +52,9 @@ static const uint8_t b1_esd_tlv[] = {
     0x00,             /* n_rtrig = 0             */
     0x00,             /* n_ftrig = 0             */
     0x00, 0x00,       /* init_len = 0            */
-    0x57, 0x00,       /* body_len = 87           */
+    0x5F, 0x00,       /* body_len = 95           */
 
-    /* === BODY (87 bytes) === */
+    /* === BODY (95 bytes) === */
 
     /* any_trip := pressure_high OR temp_high OR flow_low */
     /*   scratch[10] := bools[0] OR bools[1] */
@@ -72,42 +72,53 @@ static const uint8_t b1_esd_tlv[] = {
     0x50, 0x07, 0x00,                     /* TON_CALL tag + len=7 */
     0x00,                                 /* idx=0 */
     0x05,                                 /* in_b=5 (latched) */
-    0x2C, 0x01, 0x00, 0x00,              /* pt=300 (0x012C) LE */
+    0x2C, 0x01, 0x00, 0x00,              /* pt=300 LE */
     0x09,                                 /* q_b=9 */
 
-    /* Pre-compute IF conditions into scratch:                   */
-    /*   scratch[10] := latched AND alarm_delay.Q                */
+    /* Pre-compute outer IF condition: scratch[10] := latched AND alarm_delay.Q */
     0x11, 0x03, 0x00, 0x0A, 0x05, 0x09,   /* BOOL_AND dst=10 a=5 b=9 */
-    /*   scratch[11] := NOT alarm_delay.Q                        */
-    0x10, 0x02, 0x00, 0x0B, 0x09,         /* BOOL_NOT dst=11 src=9 */
-    /*   scratch[11] := latched AND NOT alarm_delay.Q            */
-    0x11, 0x03, 0x00, 0x0B, 0x05, 0x0B,   /* BOOL_AND dst=11 a=5 b=11 */
 
-    /* IF_BLOCK: cond=scratch[10], 1 ELSIF, 1 ELSE              */
+    /* === Outer IF_BLOCK (D5 format: ELSIF flattened) ===
+       IF latched AND alarm_delay.Q THEN
+         shutdown_cmd := TRUE; alarm_out := TRUE
+       ELSE
+         (nested IF for former ELSIF)
+       END_IF
+    */
     0x40,                                  /* tag = IF_BLOCK     */
-    0x21, 0x00,                            /* len = 33 (payload) */
-    0x0A,                                  /* cond_b = 10        */
+    0x34, 0x00,                            /* len = 52 (payload) */
+    0x0A,                                  /* cond = 10          */
+    0x02,                                  /* then_count = 2     */
+    0x01,                                  /* else_count = 1     */
     0x08, 0x00,                            /* then_len = 8       */
-    /* THEN body: shutdown_cmd := TRUE; alarm_out := TRUE */
+    0x25, 0x00,                            /* else_len = 37      */
+    /* THEN body (8 bytes): shutdown_cmd := TRUE; alarm_out := TRUE */
     0x01, 0x01, 0x00, 0x06,               /*   LOAD_TRUE dst=6  */
     0x01, 0x01, 0x00, 0x07,               /*   LOAD_TRUE dst=7  */
-    0x01,                                  /* num_elsif = 1      */
-    /* ELSIF 0: cond=scratch[11] */
-    0x0B,                                  /*   elsif_cond = 11  */
-    0x08, 0x00,                            /*   elsif_len = 8    */
-    /* ELSIF body: shutdown_cmd := FALSE; alarm_out := FALSE */
+    /* ELSE body (37 bytes): nested IF for former ELSIF */
+    /*   Pre-compute ELSIF cond: scratch[11] := NOT alarm_delay.Q */
+    0x10, 0x02, 0x00, 0x0B, 0x09,         /*   BOOL_NOT dst=11 src=9 */
+    /*   scratch[11] := latched AND NOT alarm_delay.Q */
+    0x11, 0x03, 0x00, 0x0B, 0x05, 0x0B,   /*   BOOL_AND dst=11 a=5 b=11 */
+    /*   Inner IF_BLOCK (former ELSIF) */
+    0x40,                                  /*   tag = IF_BLOCK   */
+    0x17, 0x00,                            /*   len = 23         */
+    0x0B,                                  /*   cond = 11        */
+    0x02,                                  /*   then_count = 2   */
+    0x02,                                  /*   else_count = 2   */
+    0x08, 0x00,                            /*   then_len = 8     */
+    0x08, 0x00,                            /*   else_len = 8     */
+    /* THEN body (8 bytes): shutdown_cmd := FALSE; alarm_out := FALSE */
     0x02, 0x01, 0x00, 0x06,               /*   LOAD_FALSE dst=6 */
     0x02, 0x01, 0x00, 0x07,               /*   LOAD_FALSE dst=7 */
-    /* ELSE */
-    0x08, 0x00,                            /*   else_len = 8     */
-    /* ELSE body: shutdown_cmd := FALSE; alarm_out := FALSE */
+    /* ELSE body (8 bytes): shutdown_cmd := FALSE; alarm_out := FALSE */
     0x02, 0x01, 0x00, 0x06,               /*   LOAD_FALSE dst=6 */
     0x02, 0x01, 0x00, 0x07,               /*   LOAD_FALSE dst=7 */
 };
 
 /* Verify total size at compile time */
-_Static_assert(sizeof(b1_esd_tlv) == 107,
-    "B1 TLV binary must be exactly 107 bytes");
+_Static_assert(sizeof(b1_esd_tlv) == 115,
+    "B1 TLV binary must be exactly 115 bytes");
 
 /* Pool index constants for test access */
 #define B1_PRESSURE_HIGH  0

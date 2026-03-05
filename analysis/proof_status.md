@@ -184,6 +184,82 @@ listed as future work."
 
 ---
 
+## Stack/Heap Audit (DICE* Finding 4) — RESOLVED
+
+Checked: all KaRaMeL-extracted files (LowPLC_TON_Impl.c, LowPLC_TOF_Impl.c,
+LowPLC_TP_Impl.c, LowPLC_CTU_Impl.c, LowPLC_CTD_Impl.c, LowPLC_CTUD_Impl.c,
+LowPLC_SR_Impl.c, LowPLC_RS_Impl.c, LowPLC_R_TRIG_Impl.c, LowPLC_F_TRIG_Impl.c)
+
+Result: zero malloc/calloc/realloc calls. All FBs operate on caller-provided
+buffers. Consistent with Low* Stack effect discipline.
+
+Consequence: Compositional WCET model is sound. Per-opcode costs measured by
+DWT are total costs — no hidden heap allocation overhead. compute_wcet Tot
+function accurately bounds execution time.
+
+---
+
+## D4 — Bug Found: Counter Bounds Guards
+
+During D4 testing, the C interpreter's counter step functions (CTU/CTD/CTUD)
+were found to be missing bounds guards present in the F* spec. The F* spec
+guards `cv < pv` (CTU) and `cv > 0` (CTD) before incrementing/decrementing,
+preventing overflow. The C interpreter initially lacked these guards.
+
+**Resolution:** C interpreter updated to match F* spec. All 3200/3200 E2E
+tests pass after fix. The bug motivated the D5 load-time validation work.
+
+---
+
+## D5 — EverParse Validator + WCET Calculator
+
+### EverParse TLV Validation (LowPLC_TLV.3d)
+
+| Property | Status | Notes |
+|----------|--------|-------|
+| Header validation (magic, version, pool bounds) | VERIFIED | EverParse 3D constraints |
+| Tag discrimination (P1) | VERIFIED | casetype with 18 leaf opcodes |
+| Statement count bounds (P2) | VERIFIED | `stmt_count` in array constraint |
+| Body length as byte-size driver (P3) | VERIFIED | `:byte-size body_len` |
+| Named MAX constants (P4) | VERIFIED | Inline constraints per pool field |
+| 6-level depth unrolling (D6→D1) | VERIFIED | Supports nesting depth 5 |
+
+**EverParse output:** F* verified, 44,317 bytes ARM .text. 9/9 validation tests pass
+(5 benchmarks accepted, 4 malformed inputs rejected).
+
+### WCET Calculator (LowPLC.Costs.fst + LowPLC.WCET.fst)
+
+| Property | Status | File |
+|----------|--------|------|
+| `LowPLC.Costs` — 31 cost constants | VERIFIED | LowPLC.Costs.fst |
+| `wcet_stmts` termination | VERIFIED | LowPLC.WCET.fst (Tot, decreases gas) |
+| `wcet_if_block` termination | VERIFIED | LowPLC.WCET.fst |
+| `wcet_for_block` termination | VERIFIED | LowPLC.WCET.fst |
+| `compute_wcet` total function | VERIFIED | LowPLC.WCET.fst |
+
+**Zero admit(), zero assume().** All verification conditions discharged by F*.
+
+**Soundness axiom (empirical):** The WCET bound is valid iff every cost constant
+in LowPLC.Costs is >= the actual worst-case cycle count on the target hardware.
+This is verified by DWT measurement, not by formal proof. The axiom is documented
+in comments, not stated as an F* `assume`.
+
+### Baremetal Runtime (firmware/lowplc_runtime.c)
+
+Integrated pipeline using the EverParse-generated validator:
+1. **EverParse TLV validation** — single call to `LowPlcTlvCheckLowPlcprogram()`
+   validates header, pool bounds, all opcode tags, index bounds, nesting depth
+   (<=5), and byte-size consistency (Layer 1+2)
+2. Header field extraction (no validation — reads post-EverParse)
+3. WCET computation (compositional, mirrors LowPLC.WCET.fst)
+4. WCET vs scan budget check
+5. Pool init + interpreter execution
+
+Cross-compiles clean for Cortex-M7: 4,280 bytes .text (runtime) +
+44,317 bytes .text (EverParse validator) + 116 bytes (wrapper).
+
+---
+
 ## Summary
 
 | Category | Proved | Admitted | Axiomatized | Total |
@@ -191,7 +267,9 @@ listed as future work."
 | D1 — TON combinator | 5 | 0 | 0 | 5 |
 | D2 — Remaining FBs | 46 | 0 | 0 | 46 |
 | D3 — Interpreter | 3 | 1 | 1 | 5 |
-| **Total** | **54** | **1** | **1** | **56** |
+| D5 — EverParse validator | 6 | 0 | 0 | 6 |
+| D5 — WCET calculator | 5 | 0 | 0 | 5 |
+| **Total** | **65** | **1** | **1** | **67** |
 
 The single `admit()` (gas_monotone) and single axiom (universal_correctness)
 are both structural properties of the interpreter framework, not properties
@@ -199,3 +277,6 @@ of any individual FB or opcode. All 10 FB combinators and their Low\*
 implementations are fully proved. The interpreter's opcode dispatch to those
 combinators is type-safe and total by construction (verified by F\*'s type
 checker on the Spec module).
+
+The WCET soundness axiom is empirical (cost table derived from DWT measurement)
+and is not counted as an F\* axiom — it is documented in code comments only.

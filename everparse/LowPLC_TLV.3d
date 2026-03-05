@@ -1,0 +1,484 @@
+// LowPLC_TLV.3d — EverParse 3D spec for LowPLC TLV binary validation.
+//
+// Validates the complete TLV binary at load time, ensuring:
+//   P1: Tag discrimination — every tag is a known opcode (caseof)
+//   P2: Statement counts bounded (then_count, else_count, body_count <= 64)
+//   P3: Body lengths as primary parsing driver (:byte-size)
+//   P4: All pool indices within declared bounds (MAX_* constants)
+//
+// Depth-unrolled: StmtD5 (leaf) → StmtD4 → StmtD3 → StmtD2 → StmtD1 (top)
+// ELSIFs are flattened into nested IF_BLOCKs by the D4 parser.
+
+// ═══════════════════════════════════════════════════════════════════
+// §1 — Leaf Opcode Payload Structs (fixed-size payloads)
+// ═══════════════════════════════════════════════════════════════════
+
+// §6.1 Literal Loads
+typedef struct _LoadTrue  { UINT8 dst; } LoadTrue;    // tag 0x01, 1 byte
+typedef struct _LoadFalse { UINT8 dst; } LoadFalse;   // tag 0x02, 1 byte
+typedef struct _LoadInt   { UINT8 dst; UINT16 val; } LoadInt;  // tag 0x03, 3 bytes
+
+// §6.2 Boolean Operations
+typedef struct _BoolNot  { UINT8 dst; UINT8 src; } BoolNot;             // tag 0x10, 2 bytes
+typedef struct _BoolAnd  { UINT8 dst; UINT8 a; UINT8 b; } BoolAnd;     // tag 0x11, 3 bytes
+typedef struct _BoolOr   { UINT8 dst; UINT8 a; UINT8 b; } BoolOr;      // tag 0x12, 3 bytes
+typedef struct _BoolXor  { UINT8 dst; UINT8 a; UINT8 b; } BoolXor;     // tag 0x13, 3 bytes
+typedef struct _CopyBool { UINT8 dst; UINT8 src; } CopyBool;           // tag 0x14, 2 bytes
+
+// §6.3 Integer Arithmetic
+typedef struct _IntAdd  { UINT8 dst; UINT8 a; UINT8 b; } IntAdd;   // tag 0x20, 3 bytes
+typedef struct _IntSub  { UINT8 dst; UINT8 a; UINT8 b; } IntSub;   // tag 0x21, 3 bytes
+typedef struct _IntMul  { UINT8 dst; UINT8 a; UINT8 b; } IntMul;   // tag 0x22, 3 bytes
+typedef struct _CopyInt { UINT8 dst; UINT8 src; } CopyInt;         // tag 0x23, 2 bytes
+
+// §6.4 Integer Comparisons
+typedef struct _CmpEq { UINT8 dst; UINT8 a; UINT8 b; } CmpEq;   // tag 0x30, 3 bytes
+typedef struct _CmpNe { UINT8 dst; UINT8 a; UINT8 b; } CmpNe;   // tag 0x31, 3 bytes
+typedef struct _CmpLt { UINT8 dst; UINT8 a; UINT8 b; } CmpLt;   // tag 0x32, 3 bytes
+typedef struct _CmpGt { UINT8 dst; UINT8 a; UINT8 b; } CmpGt;   // tag 0x33, 3 bytes
+typedef struct _CmpLe { UINT8 dst; UINT8 a; UINT8 b; } CmpLe;   // tag 0x34, 3 bytes
+typedef struct _CmpGe { UINT8 dst; UINT8 a; UINT8 b; } CmpGe;   // tag 0x35, 3 bytes
+
+// §6.6 Timer FB Calls (TON/TOF/TP: same payload layout)
+typedef struct _TonCall { UINT8 idx; UINT8 in_b; UINT32 pt; UINT8 q_b; } TonCall;  // tag 0x50, 7 bytes
+typedef struct _TofCall { UINT8 idx; UINT8 in_b; UINT32 pt; UINT8 q_b; } TofCall;  // tag 0x51, 7 bytes
+typedef struct _TpCall  { UINT8 idx; UINT8 in_b; UINT32 pt; UINT8 q_b; } TpCall;   // tag 0x52, 7 bytes
+
+// §6.7 Counter FB Calls
+typedef struct _CtuCall  { UINT8 idx; UINT8 cu; UINT8 r; UINT8 pv; UINT8 q; UINT8 cv; } CtuCall;           // tag 0x60, 6 bytes
+typedef struct _CtdCall  { UINT8 idx; UINT8 cd; UINT8 ld; UINT8 pv; UINT8 q; UINT8 cv; } CtdCall;          // tag 0x61, 6 bytes
+typedef struct _CtudCall { UINT8 idx; UINT8 cu; UINT8 cd; UINT8 r; UINT8 ld; UINT8 pv; UINT8 qu; UINT8 qd; UINT8 cv; } CtudCall;  // tag 0x62, 9 bytes
+
+// §6.8 Bistable and Edge Detector FB Calls
+typedef struct _SrCall    { UINT8 idx; UINT8 s1; UINT8 r; UINT8 q1; } SrCall;      // tag 0x70, 4 bytes
+typedef struct _RsCall    { UINT8 idx; UINT8 s; UINT8 r1; UINT8 q1; } RsCall;      // tag 0x71, 4 bytes
+typedef struct _RTrigCall { UINT8 idx; UINT8 clk; UINT8 q; } RTrigCall;            // tag 0x72, 3 bytes
+typedef struct _FTrigCall { UINT8 idx; UINT8 clk; UINT8 q; } FTrigCall;            // tag 0x73, 3 bytes
+
+
+// ═══════════════════════════════════════════════════════════════════
+// §2 — TLV Framing for Leaf Opcodes
+// ═══════════════════════════════════════════════════════════════════
+
+// Each opcode is [tag:1][len:2 LE][payload:len].
+// The tag determines the payload type via caseof (P1).
+
+casetype _LeafPayload (UINT8 tag) {
+    switch (tag) {
+        case 0x01: LoadTrue   load_true;
+        case 0x02: LoadFalse  load_false;
+        case 0x03: LoadInt    load_int;
+        case 0x10: BoolNot    bool_not;
+        case 0x11: BoolAnd    bool_and;
+        case 0x12: BoolOr     bool_or;
+        case 0x13: BoolXor    bool_xor;
+        case 0x14: CopyBool   copy_bool;
+        case 0x20: IntAdd     int_add;
+        case 0x21: IntSub     int_sub;
+        case 0x22: IntMul     int_mul;
+        case 0x23: CopyInt    copy_int;
+        case 0x30: CmpEq     cmp_eq;
+        case 0x31: CmpNe     cmp_ne;
+        case 0x32: CmpLt     cmp_lt;
+        case 0x33: CmpGt     cmp_gt;
+        case 0x34: CmpLe     cmp_le;
+        case 0x35: CmpGe     cmp_ge;
+        case 0x50: TonCall   ton_call;
+        case 0x51: TofCall   tof_call;
+        case 0x52: TpCall    tp_call;
+        case 0x60: CtuCall   ctu_call;
+        case 0x61: CtdCall   ctd_call;
+        case 0x62: CtudCall  ctud_call;
+        case 0x70: SrCall    sr_call;
+        case 0x71: RsCall    rs_call;
+        case 0x72: RTrigCall rtrig_call;
+        case 0x73: FTrigCall ftrig_call;
+    }
+} LeafPayload;
+
+// A leaf TLV opcode: tag + len + payload
+typedef struct _LeafTLV {
+    UINT8  tag { 0x01 <= tag && tag <= 0x73 };
+    UINT16 len;
+    LeafPayload(tag) payload[:byte-size len];
+} LeafTLV;
+
+
+// ═══════════════════════════════════════════════════════════════════
+// §3 — Depth-Unrolled Statement Types (D6 → D1)
+//     D6 = leaf only; each Dn includes IF/FOR with D(n+1) bodies
+//     Supports MAX_NESTING_DEPTH = 5 (D1→D2→D3→D4→D5→D6)
+// ═══════════════════════════════════════════════════════════════════
+
+// StmtD6 — Innermost: leaf opcodes only (no IF/FOR nesting)
+typedef struct _StmtD6 {
+    UINT8  tag { 0x01 <= tag && tag <= 0x73 };
+    UINT16 len;
+    LeafPayload(tag) payload[:byte-size len];
+} StmtD6;
+
+// --- IF/FOR at depth 5 (bodies contain StmtD6) ---
+
+typedef struct _IfBlockD5 {
+    UINT8  cond;
+    UINT8  then_count { then_count <= 64 };
+    UINT8  else_count { else_count <= 64 };
+    UINT16 then_len;
+    UINT16 else_len;
+    StmtD6 then_body[:byte-size then_len];
+    StmtD6 else_body[:byte-size else_len];
+} IfBlockD5;
+
+typedef struct _ForBlockD5 {
+    UINT8  var_idx;
+    UINT16 from_val;
+    UINT16 to_val;
+    UINT8  body_count { body_count <= 64 };
+    UINT16 body_len;
+    StmtD6 body[:byte-size body_len];
+} ForBlockD5;
+
+casetype _StmtD5Payload (UINT8 tag) {
+    switch (tag) {
+        case 0x01: LoadTrue   load_true;
+        case 0x02: LoadFalse  load_false;
+        case 0x03: LoadInt    load_int;
+        case 0x10: BoolNot    bool_not;
+        case 0x11: BoolAnd    bool_and;
+        case 0x12: BoolOr     bool_or;
+        case 0x13: BoolXor    bool_xor;
+        case 0x14: CopyBool   copy_bool;
+        case 0x20: IntAdd     int_add;
+        case 0x21: IntSub     int_sub;
+        case 0x22: IntMul     int_mul;
+        case 0x23: CopyInt    copy_int;
+        case 0x30: CmpEq     cmp_eq;
+        case 0x31: CmpNe     cmp_ne;
+        case 0x32: CmpLt     cmp_lt;
+        case 0x33: CmpGt     cmp_gt;
+        case 0x34: CmpLe     cmp_le;
+        case 0x35: CmpGe     cmp_ge;
+        case 0x40: IfBlockD5  if_block;
+        case 0x41: ForBlockD5 for_block;
+        case 0x50: TonCall   ton_call;
+        case 0x51: TofCall   tof_call;
+        case 0x52: TpCall    tp_call;
+        case 0x60: CtuCall   ctu_call;
+        case 0x61: CtdCall   ctd_call;
+        case 0x62: CtudCall  ctud_call;
+        case 0x70: SrCall    sr_call;
+        case 0x71: RsCall    rs_call;
+        case 0x72: RTrigCall rtrig_call;
+        case 0x73: FTrigCall ftrig_call;
+    }
+} StmtD5Payload;
+
+typedef struct _StmtD5 {
+    UINT8  tag;
+    UINT16 len;
+    StmtD5Payload(tag) payload[:byte-size len];
+} StmtD5;
+
+// --- IF/FOR at depth 4 (bodies contain StmtD5) ---
+
+typedef struct _IfBlockD4 {
+    UINT8  cond;
+    UINT8  then_count { then_count <= 64 };
+    UINT8  else_count { else_count <= 64 };
+    UINT16 then_len;
+    UINT16 else_len;
+    StmtD5 then_body[:byte-size then_len];
+    StmtD5 else_body[:byte-size else_len];
+} IfBlockD4;
+
+typedef struct _ForBlockD4 {
+    UINT8  var_idx;
+    UINT16 from_val;
+    UINT16 to_val;
+    UINT8  body_count { body_count <= 64 };
+    UINT16 body_len;
+    StmtD5 body[:byte-size body_len];
+} ForBlockD4;
+
+casetype _StmtD4Payload (UINT8 tag) {
+    switch (tag) {
+        case 0x01: LoadTrue   load_true;
+        case 0x02: LoadFalse  load_false;
+        case 0x03: LoadInt    load_int;
+        case 0x10: BoolNot    bool_not;
+        case 0x11: BoolAnd    bool_and;
+        case 0x12: BoolOr     bool_or;
+        case 0x13: BoolXor    bool_xor;
+        case 0x14: CopyBool   copy_bool;
+        case 0x20: IntAdd     int_add;
+        case 0x21: IntSub     int_sub;
+        case 0x22: IntMul     int_mul;
+        case 0x23: CopyInt    copy_int;
+        case 0x30: CmpEq     cmp_eq;
+        case 0x31: CmpNe     cmp_ne;
+        case 0x32: CmpLt     cmp_lt;
+        case 0x33: CmpGt     cmp_gt;
+        case 0x34: CmpLe     cmp_le;
+        case 0x35: CmpGe     cmp_ge;
+        case 0x40: IfBlockD4  if_block;
+        case 0x41: ForBlockD4 for_block;
+        case 0x50: TonCall   ton_call;
+        case 0x51: TofCall   tof_call;
+        case 0x52: TpCall    tp_call;
+        case 0x60: CtuCall   ctu_call;
+        case 0x61: CtdCall   ctd_call;
+        case 0x62: CtudCall  ctud_call;
+        case 0x70: SrCall    sr_call;
+        case 0x71: RsCall    rs_call;
+        case 0x72: RTrigCall rtrig_call;
+        case 0x73: FTrigCall ftrig_call;
+    }
+} StmtD4Payload;
+
+typedef struct _StmtD4 {
+    UINT8  tag;
+    UINT16 len;
+    StmtD4Payload(tag) payload[:byte-size len];
+} StmtD4;
+
+// --- IF/FOR at depth 3 (bodies contain StmtD4) ---
+
+typedef struct _IfBlockD3 {
+    UINT8  cond;
+    UINT8  then_count { then_count <= 64 };
+    UINT8  else_count { else_count <= 64 };
+    UINT16 then_len;
+    UINT16 else_len;
+    StmtD4 then_body[:byte-size then_len];
+    StmtD4 else_body[:byte-size else_len];
+} IfBlockD3;
+
+typedef struct _ForBlockD3 {
+    UINT8  var_idx;
+    UINT16 from_val;
+    UINT16 to_val;
+    UINT8  body_count { body_count <= 64 };
+    UINT16 body_len;
+    StmtD4 body[:byte-size body_len];
+} ForBlockD3;
+
+casetype _StmtD3Payload (UINT8 tag) {
+    switch (tag) {
+        case 0x01: LoadTrue   load_true;
+        case 0x02: LoadFalse  load_false;
+        case 0x03: LoadInt    load_int;
+        case 0x10: BoolNot    bool_not;
+        case 0x11: BoolAnd    bool_and;
+        case 0x12: BoolOr     bool_or;
+        case 0x13: BoolXor    bool_xor;
+        case 0x14: CopyBool   copy_bool;
+        case 0x20: IntAdd     int_add;
+        case 0x21: IntSub     int_sub;
+        case 0x22: IntMul     int_mul;
+        case 0x23: CopyInt    copy_int;
+        case 0x30: CmpEq     cmp_eq;
+        case 0x31: CmpNe     cmp_ne;
+        case 0x32: CmpLt     cmp_lt;
+        case 0x33: CmpGt     cmp_gt;
+        case 0x34: CmpLe     cmp_le;
+        case 0x35: CmpGe     cmp_ge;
+        case 0x40: IfBlockD3  if_block;
+        case 0x41: ForBlockD3 for_block;
+        case 0x50: TonCall   ton_call;
+        case 0x51: TofCall   tof_call;
+        case 0x52: TpCall    tp_call;
+        case 0x60: CtuCall   ctu_call;
+        case 0x61: CtdCall   ctd_call;
+        case 0x62: CtudCall  ctud_call;
+        case 0x70: SrCall    sr_call;
+        case 0x71: RsCall    rs_call;
+        case 0x72: RTrigCall rtrig_call;
+        case 0x73: FTrigCall ftrig_call;
+    }
+} StmtD3Payload;
+
+typedef struct _StmtD3 {
+    UINT8  tag;
+    UINT16 len;
+    StmtD3Payload(tag) payload[:byte-size len];
+} StmtD3;
+
+// --- IF/FOR at depth 2 (bodies contain StmtD3) ---
+
+typedef struct _IfBlockD2 {
+    UINT8  cond;
+    UINT8  then_count { then_count <= 64 };
+    UINT8  else_count { else_count <= 64 };
+    UINT16 then_len;
+    UINT16 else_len;
+    StmtD3 then_body[:byte-size then_len];
+    StmtD3 else_body[:byte-size else_len];
+} IfBlockD2;
+
+typedef struct _ForBlockD2 {
+    UINT8  var_idx;
+    UINT16 from_val;
+    UINT16 to_val;
+    UINT8  body_count { body_count <= 64 };
+    UINT16 body_len;
+    StmtD3 body[:byte-size body_len];
+} ForBlockD2;
+
+casetype _StmtD2Payload (UINT8 tag) {
+    switch (tag) {
+        case 0x01: LoadTrue   load_true;
+        case 0x02: LoadFalse  load_false;
+        case 0x03: LoadInt    load_int;
+        case 0x10: BoolNot    bool_not;
+        case 0x11: BoolAnd    bool_and;
+        case 0x12: BoolOr     bool_or;
+        case 0x13: BoolXor    bool_xor;
+        case 0x14: CopyBool   copy_bool;
+        case 0x20: IntAdd     int_add;
+        case 0x21: IntSub     int_sub;
+        case 0x22: IntMul     int_mul;
+        case 0x23: CopyInt    copy_int;
+        case 0x30: CmpEq     cmp_eq;
+        case 0x31: CmpNe     cmp_ne;
+        case 0x32: CmpLt     cmp_lt;
+        case 0x33: CmpGt     cmp_gt;
+        case 0x34: CmpLe     cmp_le;
+        case 0x35: CmpGe     cmp_ge;
+        case 0x40: IfBlockD2  if_block;
+        case 0x41: ForBlockD2 for_block;
+        case 0x50: TonCall   ton_call;
+        case 0x51: TofCall   tof_call;
+        case 0x52: TpCall    tp_call;
+        case 0x60: CtuCall   ctu_call;
+        case 0x61: CtdCall   ctd_call;
+        case 0x62: CtudCall  ctud_call;
+        case 0x70: SrCall    sr_call;
+        case 0x71: RsCall    rs_call;
+        case 0x72: RTrigCall rtrig_call;
+        case 0x73: FTrigCall ftrig_call;
+    }
+} StmtD2Payload;
+
+typedef struct _StmtD2 {
+    UINT8  tag;
+    UINT16 len;
+    StmtD2Payload(tag) payload[:byte-size len];
+} StmtD2;
+
+// --- IF/FOR at depth 1 (bodies contain StmtD2 — top level) ---
+
+typedef struct _IfBlockD1 {
+    UINT8  cond;
+    UINT8  then_count { then_count <= 64 };
+    UINT8  else_count { else_count <= 64 };
+    UINT16 then_len;
+    UINT16 else_len;
+    StmtD2 then_body[:byte-size then_len];
+    StmtD2 else_body[:byte-size else_len];
+} IfBlockD1;
+
+typedef struct _ForBlockD1 {
+    UINT8  var_idx;
+    UINT16 from_val;
+    UINT16 to_val;
+    UINT8  body_count { body_count <= 64 };
+    UINT16 body_len;
+    StmtD2 body[:byte-size body_len];
+} ForBlockD1;
+
+casetype _StmtD1Payload (UINT8 tag) {
+    switch (tag) {
+        case 0x01: LoadTrue   load_true;
+        case 0x02: LoadFalse  load_false;
+        case 0x03: LoadInt    load_int;
+        case 0x10: BoolNot    bool_not;
+        case 0x11: BoolAnd    bool_and;
+        case 0x12: BoolOr     bool_or;
+        case 0x13: BoolXor    bool_xor;
+        case 0x14: CopyBool   copy_bool;
+        case 0x20: IntAdd     int_add;
+        case 0x21: IntSub     int_sub;
+        case 0x22: IntMul     int_mul;
+        case 0x23: CopyInt    copy_int;
+        case 0x30: CmpEq     cmp_eq;
+        case 0x31: CmpNe     cmp_ne;
+        case 0x32: CmpLt     cmp_lt;
+        case 0x33: CmpGt     cmp_gt;
+        case 0x34: CmpLe     cmp_le;
+        case 0x35: CmpGe     cmp_ge;
+        case 0x40: IfBlockD1  if_block;
+        case 0x41: ForBlockD1 for_block;
+        case 0x50: TonCall   ton_call;
+        case 0x51: TofCall   tof_call;
+        case 0x52: TpCall    tp_call;
+        case 0x60: CtuCall   ctu_call;
+        case 0x61: CtdCall   ctd_call;
+        case 0x62: CtudCall  ctud_call;
+        case 0x70: SrCall    sr_call;
+        case 0x71: RsCall    rs_call;
+        case 0x72: RTrigCall rtrig_call;
+        case 0x73: FTrigCall ftrig_call;
+    }
+} StmtD1Payload;
+
+typedef struct _StmtD1 {
+    UINT8  tag;
+    UINT16 len;
+    StmtD1Payload(tag) payload[:byte-size len];
+} StmtD1;
+
+
+// ═══════════════════════════════════════════════════════════════════
+// §4 — TLV Header
+// ═══════════════════════════════════════════════════════════════════
+
+typedef struct _LowPLCHeader {
+    UINT8  magic0   { magic0 == 0x4C };          // 'L'
+    UINT8  magic1   { magic1 == 0x50 };          // 'P'
+    UINT8  version  { version == 0x01 };
+    UINT8  flags;                                 // reserved
+    UINT8  n_bools  { n_bools <= 64 };
+    UINT8  n_ints   { n_ints <= 32 };
+    UINT8  n_ton    { n_ton <= 8 };
+    UINT8  n_tof    { n_tof <= 8 };
+    UINT8  n_tp     { n_tp <= 8 };
+    UINT8  n_ctu    { n_ctu <= 8 };
+    UINT8  n_ctd    { n_ctd <= 8 };
+    UINT8  n_ctud   { n_ctud <= 4 };
+    UINT8  n_sr     { n_sr <= 8 };
+    UINT8  n_rs     { n_rs <= 8 };
+    UINT8  n_rtrig  { n_rtrig <= 8 };
+    UINT8  n_ftrig  { n_ftrig <= 8 };
+    UINT16 init_len;
+    UINT16 body_len;
+} LowPLCHeader;
+
+
+// ═══════════════════════════════════════════════════════════════════
+// §5 — Top-Level Program (header inlined for field reference access)
+// ═══════════════════════════════════════════════════════════════════
+
+entrypoint typedef struct _LowPLCProgram {
+    // Header fields (20 bytes)
+    UINT8  magic0   { magic0 == 0x4C };
+    UINT8  magic1   { magic1 == 0x50 };
+    UINT8  version  { version == 0x01 };
+    UINT8  flags;
+    UINT8  n_bools  { n_bools <= 64 };
+    UINT8  n_ints   { n_ints <= 32 };
+    UINT8  n_ton    { n_ton <= 8 };
+    UINT8  n_tof    { n_tof <= 8 };
+    UINT8  n_tp     { n_tp <= 8 };
+    UINT8  n_ctu    { n_ctu <= 8 };
+    UINT8  n_ctd    { n_ctd <= 8 };
+    UINT8  n_ctud   { n_ctud <= 4 };
+    UINT8  n_sr     { n_sr <= 8 };
+    UINT8  n_rs     { n_rs <= 8 };
+    UINT8  n_rtrig  { n_rtrig <= 8 };
+    UINT8  n_ftrig  { n_ftrig <= 8 };
+    UINT16 init_len;
+    UINT16 body_len;
+    // Sections
+    StmtD1 init_stmts[:byte-size init_len];
+    StmtD1 body_stmts[:byte-size body_len];
+} LowPLCProgram;

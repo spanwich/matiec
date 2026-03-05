@@ -20,6 +20,7 @@ CPU_FLAGS := -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard
 # ── Paths ──────────────────────────────────────────────────────────────
 MATIEC_LIB := ../lib/C
 BUILD_DIR  := ../build
+FSTAR_BUILD := ../fstar/build
 COMMON     := common
 
 # ── Compiler / linker flags ────────────────────────────────────────────
@@ -46,7 +47,7 @@ COMMON_SRCS := $(COMMON)/startup_stm32f767xx.s \
                $(COMMON)/system_stm32f7xx.c \
                $(COMMON)/uart.c
 
-.PHONY: all clean sizes $(BENCHMARKS)
+.PHONY: all clean sizes $(BENCHMARKS) d5_opcodes
 
 all: $(BENCHMARKS)
 	@echo "=== All benchmarks built ==="
@@ -78,6 +79,28 @@ endef
 
 $(foreach b,$(BENCHMARKS),$(eval $(call BENCH_RULE,$(b))))
 
+# ── D5 per-opcode measurement ─────────────────────────────────────────
+# Measures KaRaMeL-extracted FB step functions + simple opcode costs.
+# Uses fstar/build/ headers and sources (unity build).
+
+d5_opcodes: d5_opcodes/benchmark_d5_opcodes.elf
+
+d5_opcodes/benchmark_d5_opcodes.elf: d5_opcodes/main.c \
+                                     $(COMMON_SRCS) \
+                                     $(COMMON)/stm32f767xx_minimal.h \
+                                     $(COMMON)/dwt.h $(COMMON)/uart.h \
+                                     $(COMMON)/measurement.h \
+                                     $(COMMON)/system_stm32f7xx.h \
+                                     $(COMMON)/stm32f767zi.ld
+	@echo "[BUILD] $@"
+	$(CC) $(CFLAGS) -I$(FSTAR_BUILD) $(ASFLAGS) \
+		$(COMMON)/startup_stm32f767xx.s \
+		$(COMMON)/system_stm32f7xx.c \
+		$(COMMON)/uart.c \
+		d5_opcodes/main.c \
+		-o $@ $(LDFLAGS)
+	$(SIZE) $@
+
 # ── Utility targets ────────────────────────────────────────────────────
 sizes:
 	@echo ""
@@ -91,3 +114,4 @@ sizes:
 clean:
 	rm -f $(foreach b,$(BENCHMARKS),$(b)/benchmark_$(b).elf)
 	rm -f $(foreach b,$(BENCHMARKS),$(b)/*.o)
+	rm -f d5_opcodes/benchmark_d5_opcodes.elf

@@ -107,6 +107,51 @@ B4_SHUTDOWN,,,,,
 B5_STRESS,,,,,
 ```
 
+## D5: Per-Opcode Cost Measurement
+
+### Build
+
+```bash
+cd measurement
+make d5_opcodes
+```
+
+### Flash
+
+```bash
+openocd -f interface/stlink-v2-1.cfg -f target/stm32f7x.cfg \
+  -c "program d5_opcodes/benchmark_d5_opcodes.elf verify reset exit"
+```
+
+### Collect Cost Table
+
+```bash
+# Live capture — writes directly to tools/cost_table.json
+python3 ../scripts/collect_opcode_costs.py --serial /dev/ttyACM0
+
+# Or from saved output
+stty -F /dev/ttyACM0 115200 raw -echo
+cat /dev/ttyACM0 > results/d5_raw.txt
+python3 ../scripts/collect_opcode_costs.py --file results/d5_raw.txt
+```
+
+### Expected Output Format
+
+```
+# D5 per-opcode cost measurement
+BEGIN_OPCODE_COSTS
+TON_CALL,<min>,<max>
+TOF_CALL,<min>,<max>
+...
+CMP_GE,<min>,<max>
+END_OPCODE_COSTS
+```
+
+The collection script writes max values to `tools/cost_table.json`, which
+feeds the WCET calculator (LowPLC.WCET.fst / firmware/lowplc_runtime.c).
+
+---
+
 ## Troubleshooting
 
 - **No serial output**: Check that the ST-LINK firmware is up to date

@@ -634,67 +634,42 @@ static void exec_stmts(const uint8_t *code, size_t code_len,
 
 static void exec_if_block(const uint8_t *code, size_t code_len,
                           size_t poff, size_t plen, var_pool_t *p, int gas) {
-    if (gas <= 0 || poff + 3 > code_len) return;
+    /* D5 format: [cond:1][then_count:1][else_count:1]
+                  [then_len:2][else_len:2]
+                  [then_body:then_len][else_body:else_len]
+       ELSIFs are flattened into nested IF_BLOCKs in the else branch. */
+    if (gas <= 0 || poff + 7 > code_len) return;
 
-    unsigned cond_b = code[poff];
-    size_t then_len = read_u16_le(code, poff + 1, code_len);
-    size_t then_off = poff + 3;
+    unsigned cond_b    = code[poff];
+    /* then_count and else_count are secondary bounds (P2) — not used at runtime */
+    size_t   then_len  = read_u16_le(code, poff + 3, code_len);
+    size_t   else_len  = read_u16_le(code, poff + 5, code_len);
+    size_t   then_off  = poff + 7;
+    size_t   else_off  = then_off + then_len;
+
     if (then_off + then_len > code_len) return;
+    if (else_off + else_len > code_len) return;
 
     if (get_bool(p, cond_b)) {
         exec_stmts(code, code_len, then_off, then_len, p, gas - 1);
-        return;
+    } else if (else_len > 0) {
+        exec_stmts(code, code_len, else_off, else_len, p, gas - 1);
     }
-
-    /* IF condition false — check ELSIFs */
-    size_t ec_off = then_off + then_len;
-    if (ec_off >= code_len) return;
-    int num_elsif = code[ec_off];
-    bool matched = false;
-    size_t after = ec_off + 1;
-    exec_elsif_chain(code, code_len, ec_off + 1, num_elsif, &matched, p,
-                     gas - 1, &after);
-
-    if (matched) return;
-
-    /* No ELSIF matched — try ELSE */
-    if (after + 2 > code_len) return;
-    size_t else_len = read_u16_le(code, after, code_len);
-    if (else_len == 0) return;
-    if (after + 2 + else_len > code_len) return;
-    exec_stmts(code, code_len, after + 2, else_len, p, gas - 1);
-}
-
-static void exec_elsif_chain(const uint8_t *code, size_t code_len,
-                             size_t off, int n, bool *matched,
-                             var_pool_t *p, int gas, size_t *after_off) {
-    while (gas > 0 && n > 0 && off + 3 <= code_len) {
-        unsigned cond_b = code[off];
-        size_t body_len = read_u16_le(code, off + 1, code_len);
-        size_t body_off = off + 3;
-        if (body_off + body_len > code_len) break;
-
-        if (!*matched && get_bool(p, cond_b)) {
-            exec_stmts(code, code_len, body_off, body_len, p, gas - 1);
-            *matched = true;
-        }
-
-        off = body_off + body_len;
-        n--;
-        gas--;
-    }
-    *after_off = off;
 }
 
 static void exec_for_block(const uint8_t *code, size_t code_len,
                            size_t poff, size_t plen, var_pool_t *p, int gas) {
-    if (gas <= 0 || poff + 7 > code_len) return;
+    /* D5 format: [var_idx:1][from_val:2][to_val:2]
+                  [body_count:1][body_len:2][body:body_len]
+       body_count is a secondary bound (P2) — not used at runtime. */
+    if (gas <= 0 || poff + 8 > code_len) return;
 
-    unsigned idx_i = code[poff];
+    unsigned idx_i  = code[poff];
     int16_t start_v = read_i16_le(code, poff + 1, code_len);
     int16_t end_v   = read_i16_le(code, poff + 3, code_len);
-    size_t body_len = read_u16_le(code, poff + 5, code_len);
-    size_t body_off = poff + 7;
+    /* body_count at poff + 5 — secondary bound, skip */
+    size_t body_len = read_u16_le(code, poff + 6, code_len);
+    size_t body_off = poff + 8;
     if (body_off + body_len > code_len) return;
 
     int sv = (int)start_v, ev = (int)end_v;

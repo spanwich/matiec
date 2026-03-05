@@ -1631,48 +1631,54 @@ class TLVEmitter:
     # ── IF ──
 
     def _emit_if(self, stmt: StmtIf) -> bytes:
+        # Flatten ELSIFs into nested IFs in the else branch.
+        # IF a THEN ... ELSIF b THEN ... ELSE ... END_IF
+        # becomes: IF a THEN ... ELSE IF b THEN ... ELSE ... END_IF END_IF
+        if stmt.elsifs:
+            first_elsif = stmt.elsifs[0]
+            inner_if = StmtIf(
+                condition=first_elsif.condition,
+                then_body=first_elsif.body,
+                elsifs=stmt.elsifs[1:],
+                else_body=stmt.else_body,
+            )
+            flat = StmtIf(
+                condition=stmt.condition,
+                then_body=stmt.then_body,
+                elsifs=[],
+                else_body=[inner_if],
+            )
+            return self._emit_if(flat)
+
         buf = bytearray()
 
-        # Pre-compute all conditions into scratch bool slots
+        # Pre-compute condition into scratch bool slot
         cond_slot = self._alloc_bool_scratch()
         buf += self._emit_bool_expr_to(stmt.condition, cond_slot)
 
-        elsif_cond_slots = []
-        for elsif in stmt.elsifs:
-            s = self._alloc_bool_scratch()
-            buf += self._emit_bool_expr_to(elsif.condition, s)
-            elsif_cond_slots.append(s)
-
-        # Now emit the IF_BLOCK opcode
+        # Emit then-body and else-body
         then_bytes = bytearray()
+        then_count = 0
         for s in stmt.then_body:
             then_bytes += self._emit_stmt(s)
-
-        elsif_bytes_list = []
-        for elsif in stmt.elsifs:
-            eb = bytearray()
-            for s in elsif.body:
-                eb += self._emit_stmt(s)
-            elsif_bytes_list.append(bytes(eb))
+            then_count += 1
 
         else_bytes = bytearray()
+        else_count = 0
         for s in stmt.else_body:
             else_bytes += self._emit_stmt(s)
+            else_count += 1
 
-        # Build IF_BLOCK payload:
-        # [cond_b:1][then_len:2][then_body][num_elsif:1]
-        # {[elsif_cond:1][elsif_len:2][elsif_body]}*
-        # [else_len:2][else_body]
+        # Build IF_BLOCK payload (D5 format):
+        # [cond:1][then_count:1][else_count:1][then_len:2][else_len:2]
+        # [then_body:then_len][else_body:else_len]
         payload = bytearray()
         payload += bytes([cond_slot])
+        payload += bytes([then_count])
+        payload += bytes([else_count])
         payload += struct.pack('<H', len(then_bytes))
-        payload += then_bytes
-        payload += bytes([len(stmt.elsifs)])
-        for i, elsif in enumerate(stmt.elsifs):
-            payload += bytes([elsif_cond_slots[i]])
-            payload += struct.pack('<H', len(elsif_bytes_list[i]))
-            payload += elsif_bytes_list[i]
         payload += struct.pack('<H', len(else_bytes))
+        payload += then_bytes
         payload += else_bytes
 
         buf += self._tlv(TAG_IF_BLOCK, bytes(payload))
@@ -1693,11 +1699,16 @@ class TLVEmitter:
         end_val = wrap_i16(stmt.end.value)
 
         body_bytes = bytearray()
+        body_count = 0
         for s in stmt.body:
             body_bytes += self._emit_stmt(s)
+            body_count += 1
 
-        # FOR_BLOCK payload: [idx_i:1][start:2 LE][end:2 LE][body_len:2 LE][body]
-        payload = struct.pack('<BhhH', idx_i, start_val, end_val, len(body_bytes))
+        # FOR_BLOCK payload (D5 format):
+        # [idx_i:1][start:2 LE][end:2 LE][body_count:1][body_len:2 LE][body]
+        payload = struct.pack('<Bhh', idx_i, start_val, end_val)
+        payload += bytes([body_count])
+        payload += struct.pack('<H', len(body_bytes))
         payload += body_bytes
 
         return self._tlv(TAG_FOR_BLOCK, payload)
