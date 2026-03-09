@@ -280,3 +280,11 @@ checker on the Spec module).
 
 The WCET soundness axiom is empirical (cost table derived from DWT measurement)
 and is not counted as an F\* axiom — it is documented in code comments only.
+
+---
+
+## TODO — Before Hardware Measurement Phase
+- [ ] WCET calculator in firmware/lowplc_runtime.c is hand-transliterated from
+      LowPLC.WCET.fst, not KaRaMeL-extracted. Either extract via KaRaMeL before
+      hardware measurement, or scope the paper claim to "manually verified
+      transcription". Decision required before G2-Prep gate.

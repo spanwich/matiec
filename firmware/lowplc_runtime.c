@@ -225,6 +225,10 @@ void lowplc_set_tick(uint32_t tick) {
     g_pool.tick = tick;
 }
 
+void lowplc_set_bool(unsigned idx, bool val) {
+    set_bool(&g_pool, idx, val);
+}
+
 bool lowplc_get_bool(unsigned idx) {
     return get_bool(&g_pool, idx);
 }

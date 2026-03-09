@@ -89,6 +89,9 @@ void lowplc_exec_scan(void);
 /** Set the current tick counter for timer FBs. */
 void lowplc_set_tick(uint32_t tick);
 
+/** Set a bool input in the pool. */
+void lowplc_set_bool(unsigned idx, bool val);
+
 /** Read a bool output from the pool. */
 bool lowplc_get_bool(unsigned idx);
 

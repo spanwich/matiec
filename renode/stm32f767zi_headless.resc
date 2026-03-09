@@ -1,0 +1,16 @@
+mach create "LowPLC-STM32F767ZI"
+machine LoadPlatformDescription @/home/iamfo470/phd/matiec/renode/stm32f767zi.repl
+
+# Load ELF
+sysbus LoadELF @/home/iamfo470/phd/matiec/firmware/lowplc_bringup.elf
+
+# Copy vector table entries from Flash to boot mirror
+# (Cortex-M reads initial SP from 0x0 and Reset vector from 0x4)
+$sp = `sysbus ReadDoubleWord 0x08000000`
+$pc = `sysbus ReadDoubleWord 0x08000004`
+sysbus WriteDoubleWord 0x00000000 $sp
+sysbus WriteDoubleWord 0x00000004 $pc
+
+showAnalyzer sysbus.usart3
+
+start
