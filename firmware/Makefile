@@ -7,17 +7,19 @@ SIZE    := $(PREFIX)size
 COMMON  := ../measurement/common
 EVERPARSE := ../everparse
 FSTAR_BUILD := ../fstar/build
-INTERP  := ../fstar/test
+BUILD_LOW := ../fstar/build_low
+KRML_INC  := $(HOME)/phd/everparse/opt/karamel/include
+KRML_MIN  := $(HOME)/phd/everparse/opt/karamel/krmllib/dist/minimal
 
 CPU_FLAGS := -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard
 
 MATIEC_LIB := ../lib/C
 
 CFLAGS := $(CPU_FLAGS) -O0 -g3 -Wall -Wextra \
-          -I$(COMMON) -I. -I$(EVERPARSE) -I$(FSTAR_BUILD) -I$(INTERP) \
+          -I$(COMMON) -I. -I$(EVERPARSE) -I$(FSTAR_BUILD) \
+          -I$(BUILD_LOW) -I$(KRML_INC) -I$(KRML_MIN) \
           -I$(MATIEC_LIB) \
           -DSTM32F767xx -DLOWPLC_RENODE \
-          -D_WIN32 \
           '-DKRML_HOST_PRINTF(...)=((void)0)' \
           '-DKRML_HOST_EXIT(x)=while(1){}' \
           -ffunction-sections -fdata-sections \
@@ -33,7 +35,8 @@ SRCS := main_bringup.c \
         $(COMMON)/system_stm32f7xx.c \
         $(COMMON)/uart.c \
         $(EVERPARSE)/LowPLC_TLV.c \
-        $(EVERPARSE)/LowPLC_TLVWrapper.c
+        $(EVERPARSE)/LowPLC_TLVWrapper.c \
+        $(BUILD_LOW)/LowPLC_Interp_Low.c
 
 ASM := $(COMMON)/startup_stm32f767xx.s
 

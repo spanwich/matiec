@@ -11,6 +11,9 @@ BUILD   = ../build
 B1_BUILD = ../../build/b1
 
 LOWPLC_SRCS = $(wildcard $(BUILD)/LowPLC_*_Impl.c)
+BUILD_LOW = ../build_low
+KRML_INC  = $(HOME)/phd/everparse/opt/karamel/include
+KRML_MIN  = $(HOME)/phd/everparse/opt/karamel/krmllib/dist/minimal
 
 .PHONY: all clean test
 
@@ -22,8 +25,8 @@ test_fbs: test_fbs.c $(LOWPLC_SRCS)
 test_ton: test_ton.c
 	$(CC) $(CFLAGS) -I$(MATIEC) -I$(BUILD) -o $@ $<
 
-test_interp: test_interp.c
-	$(CC) $(CFLAGS) -I$(MATIEC) -I$(B1_BUILD) -I. -o $@ $<
+test_interp: test_interp.c $(BUILD_LOW)/LowPLC_Interp_Low.c
+	$(CC) $(CFLAGS) -I$(MATIEC) -I$(B1_BUILD) -I. -I$(BUILD_LOW) -I$(KRML_INC) -I$(KRML_MIN) -o $@ $^
 
 test: test_fbs test_ton test_interp
 	@echo "=== Running test_ton ==="

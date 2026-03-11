@@ -239,9 +239,11 @@ def generate_test_c(bench_id: str, bench: dict, emitter: TLVEmitter,
     lines.append('    /* Init both engines */')
     lines.append('    var_pool_t pool;')
     lines.append('    init_pool(&pool, &hdr);')
+    lines.append(f'    pool.scan_cycle_period_us = {tick_ms * 1000};')
     lines.append(f'    exec_init({bench_id}_tlv, sizeof({bench_id}_tlv), &hdr, &pool, 1024);')
     lines.append('')
     lines.append(f'    {struct_name} matiec;')
+    lines.append(f'    memset(&matiec, 0, sizeof(matiec));')
     lines.append(f'    {init_name}(&matiec, 0);')
     lines.append('')
 
@@ -319,6 +321,9 @@ def run_benchmark_test(bench_id: str, num_scans: int, verbose: bool = False) -> 
     build_dir = os.path.join(BASE_DIR, bench['build_dir'])
     matiec_lib = os.path.join(BASE_DIR, 'lib', 'C')
     interp_dir = os.path.join(BASE_DIR, 'fstar', 'test')
+    build_low_dir = os.path.join(BASE_DIR, 'fstar', 'build_low')
+    krml_inc = os.path.join(os.path.expanduser('~'), 'phd', 'everparse', 'opt', 'karamel', 'include')
+    krml_min = os.path.join(os.path.expanduser('~'), 'phd', 'everparse', 'opt', 'karamel', 'krmllib', 'dist', 'minimal')
 
     # Step 1: Parse and emit TLV
     with open(source_path) as f:
@@ -344,11 +349,13 @@ def run_benchmark_test(bench_id: str, num_scans: int, verbose: bool = False) -> 
 
         # Step 3: Compile
         exe_path = os.path.join(tmpdir, f'test_{bench_id}')
+        extracted_c = os.path.join(build_low_dir, 'LowPLC_Interp_Low.c')
         compile_cmd = [
             'gcc', '-O0', '-fsanitize=address,undefined',
             '-Wall', '-Wextra', '-Wno-unused-parameter',
             f'-I{matiec_lib}', f'-I{build_dir}', f'-I{interp_dir}', f'-I{tmpdir}',
-            '-o', exe_path, test_c_path,
+            f'-I{build_low_dir}', f'-I{krml_inc}', f'-I{krml_min}',
+            '-o', exe_path, test_c_path, extracted_c,
         ]
 
         if verbose:

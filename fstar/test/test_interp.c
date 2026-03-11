@@ -136,14 +136,16 @@ int main(void)
     CHECK(hdr.n_bools == 12, "Expected 12 bools, got %d", hdr.n_bools);
     CHECK(hdr.n_sr == 1, "Expected 1 SR, got %d", hdr.n_sr);
     CHECK(hdr.n_ton == 1, "Expected 1 TON, got %d", hdr.n_ton);
-    CHECK(hdr.body_len == 87, "Expected body_len=87, got %d", hdr.body_len);
+    CHECK(hdr.body_len == 95, "Expected body_len=95, got %d", hdr.body_len);
 
     /* Initialize both engines */
     var_pool_t pool;
     init_pool(&pool, &hdr);
+    pool.scan_cycle_period_us = 10000;  /* 10ms scan — matches matiec test */
     exec_init(b1_esd_tlv, sizeof(b1_esd_tlv), &hdr, &pool, 1024);
 
     ESD_INTERLOCK_data__ matiec;
+    memset(&matiec, 0, sizeof(matiec));
     ESD_INTERLOCK_init__(&matiec, 0);
 
     /* ── Scenario 1: No trips, all clear ── */

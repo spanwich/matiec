@@ -5,13 +5,17 @@
  *            Validates header, pool bounds, all opcode tags, index bounds,
  *            nesting depth (<=5), and byte-size consistency in a single call.
  * Layer 3:   WCET computation (transliterated from LowPLC.WCET.fst)
- * Layer 4:   Interpreter (via lowplc_interp.h)
+ * Layer 4:   KaRaMeL-extracted verified interpreter (LowPLC_Interp_Low.c)
+ *
+ * D6-TCB: This file uses the KaRaMeL-extracted types and exec_stmts_low()
+ * directly — NO test adapter (lowplc_interp.h) in the firmware TCB.
  *
  * Source: everparse/LowPLC_TLV.3d, fstar/src/LowPLC.WCET.fst,
- *         fstar/test/lowplc_interp.h
+ *         fstar/build_low/LowPLC_Interp_Low.{c,h}
  */
 
 #include "lowplc_runtime.h"
+#include <string.h>
 
 /* ── Bare-metal EverParse overrides ──────────────────────────────── */
 /* Suppress stdio/stdlib dependencies from EverParse runtime headers.
@@ -26,8 +30,8 @@
 /* EverParse-generated TLV validator (Layer 1+2) */
 #include "LowPLC_TLVWrapper.h"
 
-/* Pull in the interpreter (header-only, unity build) */
-#include "lowplc_interp.h"
+/* KaRaMeL-extracted verified interpreter (Layer 4) */
+#include "LowPLC_Interp_Low.h"
 
 /* ── EverParse error callback (bare-metal: no-op) ────────────────── */
 void LowPLC_TLVEverParseError(const char *StructName,
@@ -38,12 +42,112 @@ void LowPLC_TLVEverParseError(const char *StructName,
     (void)Reason;
 }
 
+/* ── TLV Opcode Tags (compile-time constants for WCET switch) ────── */
+/* KaRaMeL extracts these as extern uint8_t (not usable in case labels),
+ * so we define compile-time macros matching the TLV format spec. */
+
+#define TAG_LOAD_TRUE   0x01
+#define TAG_LOAD_FALSE  0x02
+#define TAG_LOAD_INT    0x03
+#define TAG_BOOL_NOT    0x10
+#define TAG_BOOL_AND    0x11
+#define TAG_BOOL_OR     0x12
+#define TAG_BOOL_XOR    0x13
+#define TAG_COPY_BOOL   0x14
+#define TAG_INT_ADD     0x20
+#define TAG_INT_SUB     0x21
+#define TAG_INT_MUL     0x22
+#define TAG_COPY_INT    0x23
+#define TAG_CMP_EQ      0x30
+#define TAG_CMP_NE      0x31
+#define TAG_CMP_LT      0x32
+#define TAG_CMP_GT      0x33
+#define TAG_CMP_LE      0x34
+#define TAG_CMP_GE      0x35
+#define TAG_IF_BLOCK    0x40
+#define TAG_FOR_BLOCK   0x41
+#define TAG_TON_CALL    0x50
+#define TAG_TOF_CALL    0x51
+#define TAG_TP_CALL     0x52
+#define TAG_CTU_CALL    0x60
+#define TAG_CTD_CALL    0x61
+#define TAG_CTUD_CALL   0x62
+#define TAG_SR_CALL     0x70
+#define TAG_RS_CALL     0x71
+#define TAG_RTRIG_CALL  0x72
+#define TAG_FTRIG_CALL  0x73
+
+/* ── TLV Header (boundary struct for field extraction) ───────────── */
+
+typedef struct {
+    uint8_t  n_bools, n_ints;
+    uint8_t  n_ton, n_tof, n_tp;
+    uint8_t  n_ctu, n_ctd, n_ctud;
+    uint8_t  n_sr, n_rs, n_rtrig, n_ftrig;
+    uint16_t init_len, body_len;
+} tlv_header_t;
+
+/* ── Byte Parsing Helpers (for WCET calculator) ──────────────────── */
+
+static inline uint16_t read_u16_le(const uint8_t *s, size_t off, size_t len) {
+    if (off + 2 > len) return 0;
+    return (uint16_t)s[off] | ((uint16_t)s[off+1] << 8);
+}
+
+static inline int16_t read_i16_le(const uint8_t *s, size_t off, size_t len) {
+    return (int16_t)read_u16_le(s, off, len);
+}
+
+/* ── Variable Pool — global arrays using KaRaMeL-extracted types ── */
+/* D6-TCB: ONE definition of pool storage, using the same FB flat types
+ * that the verified interpreter operates on. No intermediate var_pool_t. */
+
+static bool     g_bools[LOWPLC_MAX_BOOLS];
+static int16_t  g_ints[LOWPLC_MAX_INTS];
+static LowPLC_Interp_Low_ton_flat   g_tons[LOWPLC_MAX_TON];
+static LowPLC_Interp_Low_tof_flat   g_tofs[LOWPLC_MAX_TOF];
+static LowPLC_Interp_Low_tp_flat    g_tps[LOWPLC_MAX_TP];
+static LowPLC_Interp_Low_ctu_flat   g_ctus[LOWPLC_MAX_CTU];
+static LowPLC_Interp_Low_ctd_flat   g_ctds[LOWPLC_MAX_CTD];
+static LowPLC_Interp_Low_ctud_flat  g_ctuds[LOWPLC_MAX_CTUD];
+static uint8_t  g_srs[LOWPLC_MAX_SR];
+static uint8_t  g_rss[LOWPLC_MAX_RS];
+static uint8_t  g_rtrigs[LOWPLC_MAX_RTRIG];
+static uint8_t  g_ftrigs[LOWPLC_MAX_FTRIG];
+
+static uint32_t g_n_bools, g_n_ints;
+static uint32_t g_n_ton, g_n_tof, g_n_tp;
+static uint32_t g_n_ctu, g_n_ctd, g_n_ctud;
+static uint32_t g_n_sr, g_n_rs, g_n_rtrig, g_n_ftrig;
+static uint32_t g_tick;
+static uint32_t g_scan_period_us;
+
 /* ── Internal State ───────────────────────────────────────────────── */
 
-static const uint8_t *g_tlv;
+static const uint8_t *g_tlv_ptr;
 static size_t         g_tlv_len;
 static tlv_header_t   g_header;
-static var_pool_t     g_pool;
+
+/* ── Build low_pool from global arrays ───────────────────────────── */
+/* Boundary code: assembles the verified low_pool struct pointing into
+ * the global arrays above. Called before each exec_stmts_low() call. */
+
+static LowPLC_Interp_Low_low_pool build_pool(void) {
+    return (LowPLC_Interp_Low_low_pool){
+        .lp_bools = g_bools,     .lp_ints = g_ints,
+        .lp_tons = g_tons,       .lp_tofs = g_tofs,     .lp_tps = g_tps,
+        .lp_ctus = g_ctus,       .lp_ctds = g_ctds,     .lp_ctuds = g_ctuds,
+        .lp_srs = g_srs,         .lp_rss = g_rss,
+        .lp_rtrigs = g_rtrigs,   .lp_ftrigs = g_ftrigs,
+        .lp_n_bools = g_n_bools, .lp_n_ints = g_n_ints,
+        .lp_n_ton = g_n_ton,     .lp_n_tof = g_n_tof,   .lp_n_tp = g_n_tp,
+        .lp_n_ctu = g_n_ctu,     .lp_n_ctd = g_n_ctd,   .lp_n_ctud = g_n_ctud,
+        .lp_n_sr = g_n_sr,       .lp_n_rs = g_n_rs,
+        .lp_n_rtrig = g_n_rtrig, .lp_n_ftrig = g_n_ftrig,
+        .lp_tick = g_tick,
+        .lp_scan_period_us = g_scan_period_us,
+    };
+}
 
 /* ── Per-opcode cost constants (placeholder 0 — from DWT Phase 3) ─ */
 
@@ -66,7 +170,7 @@ static const uint32_t cost_rtrig_call = 0, cost_ftrig_call = 0;
 /* ── Header Field Extraction ─────────────────────────────────────── */
 /* No validation here — EverParse (Layer 1+2) already verified all
  * header fields, pool bounds, and structural integrity. This just
- * reads the validated fields into the interpreter's header struct. */
+ * reads the validated fields into the local header struct. */
 
 static void extract_header(const uint8_t *tlv, tlv_header_t *h) {
     h->n_bools = tlv[4];
@@ -182,25 +286,70 @@ static uint32_t wcet_stmts(const uint8_t *code, size_t code_len,
     return total;
 }
 
+/* ── Pool Initialization ─────────────────────────────────────────── */
+/* Boundary code: zeros all global arrays and copies pool sizes from
+ * the validated TLV header. */
+
+static void init_pool_from_header(const tlv_header_t *h) {
+    memset(g_bools,  0, sizeof(g_bools));
+    memset(g_ints,   0, sizeof(g_ints));
+    memset(g_tons,   0, sizeof(g_tons));
+    memset(g_tofs,   0, sizeof(g_tofs));
+    memset(g_tps,    0, sizeof(g_tps));
+    memset(g_ctus,   0, sizeof(g_ctus));
+    memset(g_ctds,   0, sizeof(g_ctds));
+    memset(g_ctuds,  0, sizeof(g_ctuds));
+    memset(g_srs,    0, sizeof(g_srs));
+    memset(g_rss,    0, sizeof(g_rss));
+    memset(g_rtrigs, 0, sizeof(g_rtrigs));
+    memset(g_ftrigs, 0, sizeof(g_ftrigs));
+
+    g_n_bools = h->n_bools;
+    g_n_ints  = h->n_ints;
+    g_n_ton   = h->n_ton;
+    g_n_tof   = h->n_tof;
+    g_n_tp    = h->n_tp;
+    g_n_ctu   = h->n_ctu;
+    g_n_ctd   = h->n_ctd;
+    g_n_ctud  = h->n_ctud;
+    g_n_sr    = h->n_sr;
+    g_n_rs    = h->n_rs;
+    g_n_rtrig = h->n_rtrig;
+    g_n_ftrig = h->n_ftrig;
+    g_tick    = 0;
+}
+
 /* ── Public API Implementation ───────────────────────────────────── */
 
 lowplc_err_t lowplc_load_program(const uint8_t *tlv, size_t len,
                                  uint32_t scan_period_cycles,
+                                 uint32_t scan_cycle_period_us,
                                  uint32_t *wcet_out) {
     /* Layer 1+2: EverParse TLV validation (header + pool bounds +
      * opcode tags + index bounds + nesting depth + byte-size checks).
      * Single call replaces all hand-written validators. */
     if (len < 20 || len > UINT32_MAX)
         return LOWPLC_ERR_HEADER;
+    if (len > LOWPLC_MAX_TLV_SIZE)
+        return LOWPLC_ERR_HEADER;
     if (!LowPlcTlvCheckLowPlcprogram((uint8_t *)(uintptr_t)tlv, (uint32_t)len))
         return LOWPLC_ERR_OPCODES;
+
+    if (scan_cycle_period_us == 0)
+        return LOWPLC_ERR_INVALID_PERIOD;
+
+    /* ADR-009: store const pointer — no mutable copy needed.
+     * Timer pt_us values stay as microseconds in the TLV; conversion to
+     * pt_ticks happens inside the verified *_step_us wrappers at dispatch. */
+    g_tlv_ptr = tlv;
+    g_tlv_len = len;
 
     /* Extract validated header fields for interpreter + WCET */
     extract_header(tlv, &g_header);
 
     /* Layer 3: WCET computation (BODY only — runs every scan) */
     size_t body_off = 20 + g_header.init_len;
-    uint32_t wcet = wcet_stmts(tlv, len, body_off, g_header.body_len,
+    uint32_t wcet = wcet_stmts(g_tlv_ptr, len, body_off, g_header.body_len,
                                LOWPLC_INTERP_GAS);
 
     if (wcet_out) *wcet_out = wcet;
@@ -209,30 +358,37 @@ lowplc_err_t lowplc_load_program(const uint8_t *tlv, size_t len,
         return LOWPLC_ERR_WCET;
 
     /* Layer 4: Init pool + exec_init */
-    g_tlv     = tlv;
-    g_tlv_len = len;
-    init_pool(&g_pool, &g_header);
-    exec_init(tlv, len, &g_header, &g_pool, LOWPLC_INTERP_GAS);
+    init_pool_from_header(&g_header);
+    g_scan_period_us = scan_cycle_period_us;
+
+    LowPLC_Interp_Low_low_pool lp = build_pool();
+    LowPLC_Interp_Low_exec_stmts_low(
+        (uint8_t *)(uintptr_t)g_tlv_ptr, (uint32_t)g_tlv_len,
+        20, g_header.init_len, lp, LOWPLC_INTERP_GAS);
 
     return LOWPLC_OK;
 }
 
 void lowplc_exec_scan(void) {
-    exec_scan(g_tlv, g_tlv_len, &g_header, &g_pool, LOWPLC_INTERP_GAS);
+    LowPLC_Interp_Low_low_pool lp = build_pool();
+    LowPLC_Interp_Low_exec_stmts_low(
+        (uint8_t *)(uintptr_t)g_tlv_ptr, (uint32_t)g_tlv_len,
+        20 + g_header.init_len, g_header.body_len,
+        lp, LOWPLC_INTERP_GAS);
 }
 
 void lowplc_set_tick(uint32_t tick) {
-    g_pool.tick = tick;
+    g_tick = tick;
 }
 
 void lowplc_set_bool(unsigned idx, bool val) {
-    set_bool(&g_pool, idx, val);
+    if (idx < g_n_bools) g_bools[idx] = val;
 }
 
 bool lowplc_get_bool(unsigned idx) {
-    return get_bool(&g_pool, idx);
+    return idx < g_n_bools ? g_bools[idx] : false;
 }
 
 int16_t lowplc_get_int(unsigned idx) {
-    return get_int(&g_pool, idx);
+    return idx < g_n_ints ? g_ints[idx] : 0;
 }
